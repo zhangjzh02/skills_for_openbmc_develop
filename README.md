@@ -1,1 +1,2 @@
 # skills_for_openbmc_develop
+在开发openbmc过程中需要的一些skills文件，帮助高效利用AI开发
