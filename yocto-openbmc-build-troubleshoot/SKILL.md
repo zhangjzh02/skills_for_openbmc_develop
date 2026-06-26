@@ -299,6 +299,8 @@ find $BUILDDIR/tmp/work -path "*<recipe>*" -name "log.do_compile" -exec tail -50
 | 错误现象 | 原因 | 解决方案 |
 |----------|------|----------|
 | `phosphor-dbus-interfaces` 生成失败 | sdbus++ 版本不匹配或 YAML 定义错误 | 检查 python3-sdbus++ native 依赖版本；验证 YAML 语法 |
+| `phosphor-dbus-interfaces` YAML 已 patch 但接口未生成 | `OBMC_ORG_YAML_SUBDIRS` 未包含新增的 YAML 子目录 | 在 bbappend 中追加 `OBMC_ORG_YAML_SUBDIRS:append = " xyz/new_interface"`，参考下方 phosphor-dbus-interfaces 专节 |
+| `phosphor-dbus-interfaces` bbappend 的 patch 未生效 | `SRC_URI` 为空或未引用 patch 文件 | bbappend 中需要 `SRC_URI:append = " file://xxxx.patch"` 且 `FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"` |
 | `Nothing PROVIDES 'virtual/kernel'` | BSP layer 未正确配置 | 检查 `conf/bblayers.conf` 中 BSP layer（如 meta-aspeed）是否存在且路径正确 |
 | Machine 未识别 / `MACHINE=xxx is invalid` | `meta-*/conf/machine/` 下无对应 `.conf` | 检查机型拼写；确认对应 BSP layer 已在 `bblayers.conf` 中 |
 | `do_image_wic` 失败 | 镜像大小超出 | 调整 `IMAGE_ROOTFS_SIZE` 或清理不需要的包 |
@@ -446,6 +448,117 @@ SYSTEMD_SERVICE:${PN}:append = " my-custom.service"
 # bbappend：phosphor-hwmon_1.0.bbappend         （仅匹配 1.0 版本）
 
 # 推荐使用 % 通配符以适配版本升级
+```
+
+## phosphor-dbus-interfaces 专节（OpenBMC 高频）
+
+`phosphor-dbus-interfaces` 是 OpenBMC 中最特殊的 recipe 之一，与其他模块完全不同：
+
+**它不是普通 C++ 编译，而是 YAML → sdbus++ → C++ 绑定代码生成器。**
+
+### 工作流
+
+```
+YAML 接口定义 (.yaml)
+    │
+    ▼
+sdbus++ 代码生成器 (python3-sdbus++-native)
+    │
+    ▼
+C++ 绑定代码 (server.hpp / client.hpp / common.hpp / error.hpp / server.cpp)
+    │
+    ▼
+meson 编译 → libphosphor_dbus.so
+```
+
+### 关键变量
+
+```bash
+# 查看哪些 YAML 子目录被启用
+bitbake -e phosphor-dbus-interfaces | grep "^OBMC_ORG_YAML_SUBDIRS="
+
+# 查看 meson 配置（确认 -Ddata_* 选项）
+bitbake -e phosphor-dbus-interfaces | grep "^EXTRA_OEMESON="
+```
+
+### recipe 核心机制
+
+基础 recipe (`phosphor-dbus-interfaces_git.bb`) 的工作方式：
+
+1. **默认禁用所有接口**：`do_write_config:append()` 遍历 `meson_options.txt` 中所有 `data_*` 选项，全部设为 `false`
+2. **通过 `OBMC_ORG_YAML_SUBDIRS` 选择性启用**：只有列出的子目录会设置 `-Ddata_xxx=true`
+3. **`OBMC_ORG_YAML_SUBDIRS` 来自 `phosphor-dbus-yaml.bbclass`**：它会扫描所有 layer 中 `phosphor-dbus-interfaces/` 目录下的 YAML 子目录路径
+
+### 新增接口的完整 bbappend 模板
+
+在 layer（如 `meta-s2600wf`）中添加新的 D-Bus 接口，需要同时做两件事：
+
+```bash
+# meta-xxx/recipes-phosphor/interfaces/phosphor-dbus-interfaces_%.bbappend
+
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
+
+# 步骤 1：添加 YAML 接口定义的 patch
+SRC_URI:append = " file://0001-Add-New-Interface.patch"
+
+# 步骤 2：启用新接口所在的 YAML 子目录
+# phosphor-dbus-yaml.bbclass 会自动扫描所有 layer，找到 YAML 文件后
+# 生成 OBMC_ORG_YAML_SUBDIRS 列表。如果新增的 YAML 在已有子目录中，
+# 则无需额外配置；如果是全新子目录，需要显式追加：
+OBMC_ORG_YAML_SUBDIRS:append = " xyz/openbmc_project/NewInterface"
+
+# 步骤 3（可选）：如果新增接口需要额外的依赖
+DEPENDS:append = " some-new-dependency"
+```
+
+### 常见问题排查
+
+#### 1. patch 加了但接口没生成
+
+```bash
+# 检查 patch 是否正确应用
+bitbake -c devshell phosphor-dbus-interfaces
+# 在 devshell 中检查 YAML 文件是否被 patch
+ls gen/xyz/openbmc_project/
+
+# 检查 OBMC_ORG_YAML_SUBDIRS 是否包含你的子目录
+bitbake -e phosphor-dbus-interfaces | grep OBMC_ORG_YAML_SUBDIRS
+
+# 检查 meson 配置
+bitbake -e phosphor-dbus-interfaces | grep "^EXTRA_OEMESON="
+```
+
+#### 2. bbappend 是空的（常见于迁移遗留）
+
+```bash
+# 典型空 bbappend：
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
+SRC_URI += " "
+
+# 问题：${PN} 目录下可能有几十个 patch 文件，但 SRC_URI 一个都没引用
+# 解决：检查这些 patch 是否仍需，需要的加入 SRC_URI，不需要的清理
+```
+
+#### 3. sdbus++ 找不到 YAML 文件
+
+```bash
+# 确认 YAML 文件在正确的路径
+# phosphor-dbus-yaml.bbclass 期望的路径结构：
+#   ${LAYERDIR}/recipes-phosphor/interfaces/phosphor-dbus-interfaces/
+#     └── xyz/openbmc_project/YourInterface.interface.yaml
+
+# 验证 YAML 语法
+python3 -c "import yaml; yaml.safe_load(open('your-file.yaml'))"
+```
+
+#### 4. 编译成功但运行时接口不存在
+
+```bash
+# 检查生成的 .so 中是否包含你的接口符号
+objdump -T $BUILDDIR/tmp/work/*/phosphor-dbus-interfaces/*/build/libphosphor_dbus.so* | grep -i your_interface
+
+# 检查安装的 YAML 文件
+find $BUILDDIR/tmp/work/*/phosphor-dbus-interfaces/*/image/ -name "*.yaml"
 ```
 
 ## 源码调试与补丁管理
