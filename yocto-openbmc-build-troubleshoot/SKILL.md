@@ -137,6 +137,39 @@ echo $BUILDDIR
 
 > **本节所有命令仅在编译失败或用户主动要求排查时使用。纯编译请求直接跳过。**
 
+#### ⚠️ 关键区分：临时构建目录 vs 持久源码目录
+
+bitbake 编译时源码会被拷贝到 `tmp/work/.../git/`（即 `$S`），但**这个目录是临时的**，`bitbake -c clean` 会删除。
+
+**修改源码前必须先确认 SRC_URI 的类型，找到持久化源码位置：**
+
+```bash
+# 步骤 1：查看 SRC_URI，判断源码来源
+bitbake -e <recipe> | grep "^SRC_URI="
+
+# 步骤 2A：如果是 file:// 本地源码（如 SRC_URI = "file://git"）
+# → 源码在 recipe 目录下，修改这里才是持久的
+# 路径模式：<layer>/recipes-xxx/<recipe>/<pn>/git/
+# 示例：meta-s2600wf/recipes-phosphor/pldmd/pldmd/git/src/
+# 注意：<pn> 是 ${PN} 的值，即 recipe 名（不带版本号）
+
+# 步骤 2B：如果是 git:// 远程源码
+# → 源码从 git 拉取，临时目录修改会丢失
+# → 应使用 devtool modify 或 bbappend + patch 方式修改
+
+# 快速判断方法：
+SRC_URI 包含 "file://"  → 本地源码，改 recipe 目录下的文件
+SRC_URI 包含 "git://"   → 远程源码，用 devtool/patch 方式
+```
+
+| 源码类型 | SRC_URI 示例 | 持久源码位置 | 修改方式 |
+|----------|-------------|-------------|----------|
+| 本地 file:// | `file://git` | `<layer>/recipes-xxx/<recipe>/<pn>/git/` | 直接编辑 |
+| 远程 git:// | `git://github.com/...` | 无本地持久副本 | devtool modify 或 bbappend+patch |
+| 远程 http:// | `https://...tar.gz` | 无本地持久副本 | devtool modify 或 bbappend+patch |
+
+**常见错误：直接修改 `$S`（即 `tmp/work/.../git/`），clean 后修改全部丢失。**
+
 #### Yocto/OE：查找 recipe
 
 ```bash
